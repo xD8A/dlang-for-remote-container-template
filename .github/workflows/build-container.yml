@@ -7,12 +7,6 @@ permissions:
   contents: read
   packages: write
 
-env:
-  DC: dmd
-  VERSION: '2.113.0'
-  BASE: ubuntu
-  PLATFORMS: linux/amd64
-
 jobs:
   base:
     runs-on: ubuntu-24.04
@@ -55,7 +49,20 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check if image exists
+        id: check
+        env:
+          REF: ${{ steps.tags.outputs.repo }}:${{ matrix.version }}
+        run: |
+          if docker buildx imagetools inspect "$REF" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice ::${REF} already exists in the registry; skipping build."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push
+        if: steps.check.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -75,7 +82,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        dc: [dmd, ldc]
         qt_version: ['6.4.3', '6.5.3', '6.6.3', '6.7.3', '6.8.3', '6.9.3', '6.10.3', '6.11.3', '6.12.0']
+        include:
+          - { dc: dmd, version: '2.113.0', base: ubuntu }
+          - { dc: ldc, version: '1.43.0', base: ubuntu }
     steps:
       - uses: actions/checkout@v4
 
@@ -83,12 +94,26 @@ jobs:
         id: tags
         env:
           OWNER: ${{ github.repository_owner }}
+          DC: ${{ matrix.dc }}
+          VERSION: ${{ matrix.version }}
+          BASE: ${{ matrix.base }}
           QT_VERSION: ${{ matrix.qt_version }}
         run: |
           owner="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
           repo="ghcr.io/${owner}/${BASE}-${DC}"
           echo "base_tag=${repo}:${VERSION}" >> "$GITHUB_OUTPUT"
           echo "qt_tag=${repo}:${VERSION}-qt${QT_VERSION}-minimal" >> "$GITHUB_OUTPUT"
+          # Qt arm64 Linux exists only from 6.7; dmd has no arm64 at all.
+          platforms='linux/amd64'
+          if [ "$DC" = 'ldc' ]; then
+            qt_major="${QT_VERSION%%.*}"
+            qt_rest="${QT_VERSION#*.}"
+            qt_minor="${qt_rest%%.*}"
+            if [ "$qt_major" -gt 6 ] || { [ "$qt_major" -eq 6 ] && [ "$qt_minor" -ge 7 ]; }; then
+              platforms='linux/amd64,linux/arm64'
+            fi
+          fi
+          echo "platforms=${platforms}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -103,12 +128,25 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check if image exists
+        id: check
+        env:
+          REF: ${{ steps.tags.outputs.qt_tag }}
+        run: |
+          if docker buildx imagetools inspect "$REF" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice ::${REF} already exists in the registry; skipping build."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push Qt
+        if: steps.check.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           file: .devcontainer/Dockerfile.qt
-          platforms: ${{ env.PLATFORMS }}
+          platforms: ${{ steps.tags.outputs.platforms }}
           push: true
           tags: ${{ steps.tags.outputs.qt_tag }}
           build-args: |
