@@ -2,278 +2,44 @@ name: Build containers
 
 on:
   workflow_dispatch:
-    inputs:
-      force_rebuild:
-        required: true
-        default: 'true'
-        type: choice
-        options: ['true', 'false']
-      dc:
-        required: false
-        type: choice
-        options: ['', 'dmd', 'ldc', 'gdc']
-      version:
-        required: false
-        type: string
-      platform:
-        required: false
-        type: choice
-        options: ['', 'linux64', 'linuxarm64', 'debian32']
-      base:
-        required: false
-        default: 'devcontainer'
-        type: choice
-        options: ['devcontainer', 'ubuntu']
-      qt:
-        required: false
-        default: ''
-        type: choice
-        options: ['', 'minimal']
-      qt_version:
-        required: false
-        type: string
 
 permissions:
   contents: read
   packages: write
 
-jobs:
-  prepare:
-    runs-on: ubuntu-24.04
-    outputs:
-      matrix: ${{ steps.gen.outputs.matrix }}
-    steps:
-      - name: Select matrix entries
-        id: gen
-        env:
-          SEL_DC: ${{ github.event.inputs.dc }}
-          SEL_PLATFORM: ${{ github.event.inputs.platform }}
-        run: |
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json, os
-          entries = [
-              {"dc": "dmd", "channel": "latest",  "alias": "latest", "platforms": "linux/amd64"},
-              {"dc": "dmd", "channel": "2.103.1", "alias": "",       "platforms": "linux/amd64"},
-              {"dc": "dmd", "channel": "master",  "alias": "master", "platforms": "linux/amd64"},
-              {"dc": "ldc", "channel": "latest",  "alias": "latest", "platforms": "linux/amd64,linux/arm64"},
-              {"dc": "ldc", "channel": "1.38.0",  "alias": "",       "platforms": "linux/amd64,linux/arm64"},
-              {"dc": "gdc", "channel": "latest",  "alias": "latest", "platforms": "linux/amd64"},
-          ]
-          dc = os.environ.get("SEL_DC", "")
-          platform = os.environ.get("SEL_PLATFORM", "")
-          if dc:
-              entries = [e for e in entries if e["dc"] == dc]
-          if platform == "linuxarm64":
-              entries = [e for e in entries if "linux/arm64" in e["platforms"]]
-          elif platform == "debian32":
-              entries = []
-          print("matrix=" + json.dumps({"include": entries}))
-          PY
+env:
+  DC: dmd
+  VERSION: '2.113.0'
+  BASE: ubuntu
+  PLATFORMS: linux/amd64
 
-  build:
-    needs: prepare
+jobs:
+  base:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compute base flavor
-        id: flavor
-        env:
-          BASE: ${{ github.event.inputs.base }}
-        run: |
-          suffix=''
-          if [ "$BASE" = 'ubuntu' ]; then suffix='-ubuntu'; fi
-          echo "suffix=${suffix}" >> "$GITHUB_OUTPUT"
-
-      - name: Restore base version cache
-        uses: actions/cache@v4
-        with:
-          path: dc-versions/base
-          key: dc-versions-base-${{ matrix.dc }}-${{ matrix.channel }}${{ steps.flavor.outputs.suffix }}-${{ github.run_id }}
-          restore-keys: |
-            dc-versions-base-${{ matrix.dc }}-${{ matrix.channel }}${{ steps.flavor.outputs.suffix }}-
-
-      - name: Restore Qt version cache
-        if: github.event.inputs.qt == 'minimal'
-        uses: actions/cache@v4
-        with:
-          path: dc-versions/qt
-          key: dc-versions-qt-${{ matrix.dc }}-${{ matrix.channel }}${{ steps.flavor.outputs.suffix }}-${{ github.event.inputs.qt_version }}-${{ github.run_id }}
-          restore-keys: |
-            dc-versions-qt-${{ matrix.dc }}-${{ matrix.channel }}${{ steps.flavor.outputs.suffix }}-${{ github.event.inputs.qt_version }}-
-
-      - name: Resolve version and decide build
-        id: resolve
+      - name: Compute tags
+        id: tags
         env:
           OWNER: ${{ github.repository_owner }}
-          DC: ${{ matrix.dc }}
-          CHANNEL: ${{ matrix.channel }}
-          ALIAS: ${{ matrix.alias }}
-          DEFAULT_PLATFORMS: ${{ matrix.platforms }}
-          FORCE: ${{ github.event.inputs.force_rebuild }}
-          SEL_DC: ${{ github.event.inputs.dc }}
-          SEL_VERSION: ${{ github.event.inputs.version }}
-          SEL_PLATFORM: ${{ github.event.inputs.platform }}
-          SEL_QT: ${{ github.event.inputs.qt }}
-          SEL_QT_VERSION: ${{ github.event.inputs.qt_version }}
-          SEL_BASE: ${{ github.event.inputs.base }}
         run: |
-          set -euo pipefail
-
-          # 1. Resolve the concrete version for the requested channel.
-          case "$DC:$CHANNEL" in
-            dmd:latest)
-              version="$(curl -fsSL --connect-timeout 10 https://downloads.dlang.org/releases/LATEST)" ;;
-            ldc:latest)
-              version="$(curl -fsSL --connect-timeout 10 https://ldc-developers.github.io/LATEST)" ;;
-            gdc:latest)
-              version="$(curl -fsSL --connect-timeout 10 https://gdcproject.org/downloads/LATEST)" ;;
-            dmd:master)
-              master_json="$(curl -fsSL --connect-timeout 10 https://api.github.com/repos/dlang/dmd/releases/tags/nightly)"
-              master_digest="$(printf '%s' "$master_json" | jq -r '[.assets[] | select(.name == "dmd.master.linux.tar.xz")][0].digest // empty')"
-              if [ -n "$master_digest" ]; then
-                version="$(printf '%.12s' "${master_digest#sha256:}")"
-              else
-                version="$(printf '%s' "$master_json" | jq -r '[.assets[] | select(.name == "dmd.master.linux.tar.xz")][0].updated_at // empty' | tr ':' '-')"
-              fi ;;
-            *)
-              version="$CHANNEL" ;;
-          esac
-          if [ -z "$version" ]; then
-            echo "::error ::could not resolve version for ${DC}:${CHANNEL}"
-            exit 1
-          fi
-
-          # 2. Apply the manual selection filter.
-          selected='true'
-          if [ -n "$SEL_DC" ] && [ "$SEL_DC" != "$DC" ]; then
-            selected='false'
-          fi
-          if [ -n "$SEL_DC" ] && [ -n "$SEL_VERSION" ] && [ "$SEL_DC" = "$DC" ] && [ "$CHANNEL" = "$SEL_VERSION" ]; then
-            version="$SEL_VERSION"
-          fi
-
-          # 3. Apply the platform filter (debian32/386 is deferred).
-          platforms="$DEFAULT_PLATFORMS"
-          case "$SEL_PLATFORM" in
-            '')      ;;
-            linux64)      platforms='linux/amd64' ;;
-            linuxarm64)   platforms='linux/arm64' ;;
-            debian32)
-              platforms=''
-              echo "::notice ::debian32 (linux/386) is deferred to a later change; skipping." ;;
-          esac
-          if [ "$platforms" = 'linux/arm64' ] && [ "$DC" != 'ldc' ]; then
-            platforms=''
-            echo "::notice ::${DC} has no upstream linux/arm64 toolchain; skipping."
-          fi
-          if [ -z "$platforms" ]; then
-            selected='false'
-          fi
-
-          # 4. Validate the optional Qt layer.
-          qt_ver=''
-          if [ "$SEL_QT" = 'minimal' ]; then
-            if [ -z "$SEL_QT_VERSION" ]; then
-              echo "::error ::qt='minimal' requires qt_version"
-              exit 1
-            fi
-            if ! printf '%s' "$SEL_QT_VERSION" | grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
-              echo "::error ::cannot parse qt_version '${SEL_QT_VERSION}': provide a numeric version like 6.7 or 6.7.3"
-              exit 1
-            fi
-            qt_ver="$SEL_QT_VERSION"
-          elif [ -n "$SEL_QT_VERSION" ]; then
-            echo "::error ::qt_version is set but qt is not 'minimal'"
-            exit 1
-          fi
-          if [ "$selected" = 'true' ] && [ -n "$qt_ver" ] && printf '%s' "$platforms" | grep -q 'linux/arm64'; then
-            qt_major="${qt_ver%%.*}"
-            qt_rest="${qt_ver#*.}"
-            qt_minor="${qt_rest%%.*}"
-            if [ "$qt_major" -lt 6 ] || { [ "$qt_major" -eq 6 ] && [ "$qt_minor" -lt 7 ]; }; then
-              echo "::error ::qt_version '${qt_ver}' is not available for linux/arm64: Qt >= 6.7 is required"
-              exit 1
-            fi
-          fi
-          base_suffix=''
-          base_image='mcr.microsoft.com/vscode/devcontainers/base:ubuntu-22.04'
-          if [ "$SEL_BASE" = 'ubuntu' ]; then
-            base_suffix='-ubuntu'
-            base_image='ubuntu:22.04'
-          fi
-          qt_suffix=''
-          if [ -n "$qt_ver" ]; then qt_suffix="-qt${qt_ver}"; fi
-          marker_base="base/${DC}-${CHANNEL}${base_suffix}"
-          marker_qt="qt/${DC}-${CHANNEL}${base_suffix}${qt_suffix}"
-
-          # 5. Change detection per variant.
-          current=''
-          if [ -f "dc-versions/${marker_base}" ]; then current="$(cat "dc-versions/${marker_base}")"; fi
-          base_changed='true'
-          if [ "$FORCE" != 'true' ] && [ -n "$current" ] && [ "$current" = "$version" ]; then base_changed='false'; fi
-
-          current=''
-          if [ -f "dc-versions/${marker_qt}" ]; then current="$(cat "dc-versions/${marker_qt}")"; fi
-          qt_changed='true'
-          if [ "$FORCE" != 'true' ] && [ -n "$current" ] && [ "$current" = "$version" ]; then qt_changed='false'; fi
-
-          # 6. Decide what this entry builds. A rebuilt base forces a Qt rebuild.
-          build_base='false'
-          build_qt='false'
-          if [ "$selected" = 'true' ]; then
-            if [ "$base_changed" = 'true' ]; then build_base='true'; fi
-            if [ -n "$qt_ver" ] && { [ "$qt_changed" = 'true' ] || [ "$build_base" = 'true' ]; }; then
-              build_qt='true'
-            fi
-          fi
-
-          # 7. Build tag lists (GHCR repository names must be lowercase; base suffix before Qt suffix).
           owner="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
-          base_tags="ghcr.io/${owner}/${DC}:${version}${base_suffix}"
-          if [ -n "$ALIAS" ]; then base_tags="${base_tags}"$'\n'"ghcr.io/${owner}/${DC}:${ALIAS}${base_suffix}"; fi
-          qt_tags=''
-          if [ -n "$qt_ver" ]; then
-            qt_tags="ghcr.io/${owner}/${DC}:${version}${base_suffix}${qt_suffix}"
-            if [ -n "$ALIAS" ]; then qt_tags="${qt_tags}"$'\n'"ghcr.io/${owner}/${DC}:${ALIAS}${base_suffix}${qt_suffix}"; fi
+          echo "repo=ghcr.io/${owner}/${BASE}-${DC}" >> "$GITHUB_OUTPUT"
+          if [ "$BASE" = 'ubuntu' ]; then
+            echo "base_image=ubuntu:22.04" >> "$GITHUB_OUTPUT"
+          else
+            echo "base_image=mcr.microsoft.com/vscode/devcontainers/base:ubuntu-22.04" >> "$GITHUB_OUTPUT"
           fi
-
-          {
-            echo "version=${version}"
-            echo "platforms=${platforms}"
-            echo "owner=${owner}"
-            echo "qt_version=${qt_ver}"
-            echo "base_image=${base_image}"
-            echo "base_suffix=${base_suffix}"
-            echo "build_base=${build_base}"
-            echo "build_qt=${build_qt}"
-            echo "marker_base=${marker_base}"
-            echo "marker_qt=${marker_qt}"
-            echo "base_tags<<EOF"
-            echo "$base_tags"
-            echo "EOF"
-            echo "qt_tags<<EOF"
-            echo "$qt_tags"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "Resolved ${DC}:${CHANNEL} -> ${version} (base=${build_base}, qt=${build_qt}, platforms='${platforms}', qt_variant='${qt_ver}')"
 
       - name: Set up QEMU
-        if: steps.resolve.outputs.build_base == 'true' || steps.resolve.outputs.build_qt == 'true'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        if: steps.resolve.outputs.build_base == 'true' || steps.resolve.outputs.build_qt == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GitHub Container Registry
-        if: steps.resolve.outputs.build_base == 'true' || steps.resolve.outputs.build_qt == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -281,43 +47,61 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
-        id: build-base
-        if: steps.resolve.outputs.build_base == 'true' && steps.resolve.outputs.platforms != ''
         uses: docker/build-push-action@v6
         with:
           context: .
           file: .devcontainer/Dockerfile
-          platforms: ${{ steps.resolve.outputs.platforms }}
+          platforms: ${{ env.PLATFORMS }}
           push: true
-          tags: ${{ steps.resolve.outputs.base_tags }}
+          tags: ${{ steps.tags.outputs.repo }}:${{ env.VERSION }}
           build-args: |
-            BASE_IMAGE=${{ steps.resolve.outputs.base_image }}
-            DC_NAME=${{ matrix.dc }}
-            DC_VERSION=${{ matrix.channel }}
+            BASE_IMAGE=${{ steps.tags.outputs.base_image }}
+            DC_NAME=${{ env.DC }}
+            DC_VERSION=${{ env.VERSION }}
 
-      - name: Record base version
-        if: success() && steps.resolve.outputs.build_base == 'true'
+  qt:
+    needs: base
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        qt_version: ['6.4.3', '6.5.3', '6.6.3', '6.7.3', '6.8.3', '6.9.3', '6.10.3', '6.11.3', '6.12.0']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute tags
+        id: tags
+        env:
+          OWNER: ${{ github.repository_owner }}
+          QT_VERSION: ${{ matrix.qt_version }}
         run: |
-          mkdir -p dc-versions/base
-          echo "${{ steps.resolve.outputs.version }}" > "dc-versions/${{ steps.resolve.outputs.marker_base }}"
+          owner="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          repo="ghcr.io/${owner}/${BASE}-${DC}"
+          echo "base_tag=${repo}:${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "qt_tag=${repo}:${VERSION}-qt${QT_VERSION}-minimal" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Qt
-        if: >-
-          steps.resolve.outputs.build_qt == 'true' &&
-          (steps.resolve.outputs.build_base == 'false' || steps.build-base.outcome == 'success')
         uses: docker/build-push-action@v6
         with:
           context: .
           file: .devcontainer/Dockerfile.qt
-          platforms: ${{ steps.resolve.outputs.platforms }}
+          platforms: ${{ env.PLATFORMS }}
           push: true
-          tags: ${{ steps.resolve.outputs.qt_tags }}
+          tags: ${{ steps.tags.outputs.qt_tag }}
           build-args: |
-            BASE_IMAGE=ghcr.io/${{ steps.resolve.outputs.owner }}/${{ matrix.dc }}:${{ steps.resolve.outputs.version }}${{ steps.resolve.outputs.base_suffix }}
-            QT_VERSION=${{ steps.resolve.outputs.qt_version }}
-
-      - name: Record Qt version
-        if: success() && steps.resolve.outputs.build_qt == 'true'
-        run: |
-          mkdir -p dc-versions/qt
-          echo "${{ steps.resolve.outputs.version }}" > "dc-versions/${{ steps.resolve.outputs.marker_qt }}"
+            BASE_IMAGE=${{ steps.tags.outputs.base_tag }}
+            QT_VERSION=${{ matrix.qt_version }}
