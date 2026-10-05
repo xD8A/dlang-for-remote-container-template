@@ -38,19 +38,45 @@ permissions:
   packages: write
 
 jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - name: Select matrix entries
+        id: gen
+        env:
+          SEL_DC: ${{ github.event.inputs.dc }}
+          SEL_PLATFORM: ${{ github.event.inputs.platform }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          entries = [
+              {"dc": "dmd", "channel": "latest",  "alias": "latest", "platforms": "linux/amd64"},
+              {"dc": "dmd", "channel": "2.103.1", "alias": "",       "platforms": "linux/amd64"},
+              {"dc": "dmd", "channel": "master",  "alias": "master", "platforms": "linux/amd64"},
+              {"dc": "ldc", "channel": "latest",  "alias": "latest", "platforms": "linux/amd64,linux/arm64"},
+              {"dc": "ldc", "channel": "1.38.0",  "alias": "",       "platforms": "linux/amd64,linux/arm64"},
+              {"dc": "gdc", "channel": "latest",  "alias": "latest", "platforms": "linux/amd64"},
+          ]
+          dc = os.environ.get("SEL_DC", "")
+          platform = os.environ.get("SEL_PLATFORM", "")
+          if dc:
+              entries = [e for e in entries if e["dc"] == dc]
+          if platform == "linuxarm64":
+              entries = [e for e in entries if "linux/arm64" in e["platforms"]]
+          elif platform == "debian32":
+              entries = []
+          print("matrix=" + json.dumps({"include": entries}))
+          PY
+
   build:
+    needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { dc: dmd, channel: latest,  alias: latest, platforms: 'linux/amd64' }
-          - { dc: dmd, channel: '2.103.1', alias: '',    platforms: 'linux/amd64' }
-          - { dc: dmd, channel: master,  alias: master, platforms: 'linux/amd64' }
-          - { dc: ldc, channel: latest,  alias: latest, platforms: 'linux/amd64,linux/arm64' }
-          - { dc: ldc, channel: '1.38.0', alias: '',    platforms: 'linux/amd64,linux/arm64' }
-          - { dc: gdc, channel: latest,  alias: latest, platforms: 'linux/amd64' }
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -207,18 +233,20 @@ jobs:
             fi
           fi
 
-          # 7. Build tag lists (base suffix before Qt suffix).
-          base_tags="ghcr.io/${OWNER}/${DC}:${version}${base_suffix}"
-          if [ -n "$ALIAS" ]; then base_tags="${base_tags}"$'\n'"ghcr.io/${OWNER}/${DC}:${ALIAS}${base_suffix}"; fi
+          # 7. Build tag lists (GHCR repository names must be lowercase; base suffix before Qt suffix).
+          owner="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          base_tags="ghcr.io/${owner}/${DC}:${version}${base_suffix}"
+          if [ -n "$ALIAS" ]; then base_tags="${base_tags}"$'\n'"ghcr.io/${owner}/${DC}:${ALIAS}${base_suffix}"; fi
           qt_tags=''
           if [ -n "$qt_ver" ]; then
-            qt_tags="ghcr.io/${OWNER}/${DC}:${version}${base_suffix}${qt_suffix}"
-            if [ -n "$ALIAS" ]; then qt_tags="${qt_tags}"$'\n'"ghcr.io/${OWNER}/${DC}:${ALIAS}${base_suffix}${qt_suffix}"; fi
+            qt_tags="ghcr.io/${owner}/${DC}:${version}${base_suffix}${qt_suffix}"
+            if [ -n "$ALIAS" ]; then qt_tags="${qt_tags}"$'\n'"ghcr.io/${owner}/${DC}:${ALIAS}${base_suffix}${qt_suffix}"; fi
           fi
 
           {
             echo "version=${version}"
             echo "platforms=${platforms}"
+            echo "owner=${owner}"
             echo "qt_version=${qt_ver}"
             echo "base_image=${base_image}"
             echo "base_suffix=${base_suffix}"
@@ -285,7 +313,7 @@ jobs:
           push: true
           tags: ${{ steps.resolve.outputs.qt_tags }}
           build-args: |
-            BASE_IMAGE=ghcr.io/${{ github.repository_owner }}/${{ matrix.dc }}:${{ steps.resolve.outputs.version }}${{ steps.resolve.outputs.base_suffix }}
+            BASE_IMAGE=ghcr.io/${{ steps.resolve.outputs.owner }}/${{ matrix.dc }}:${{ steps.resolve.outputs.version }}${{ steps.resolve.outputs.base_suffix }}
             QT_VERSION=${{ steps.resolve.outputs.qt_version }}
 
       - name: Record Qt version
