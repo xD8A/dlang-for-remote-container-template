@@ -2,6 +2,8 @@ ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 
 # Qt runtime packages and Python tooling (independent of QT_VERSION)
 RUN set -ex && \
