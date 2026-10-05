@@ -26,10 +26,16 @@ ARG QT_VERSION
 # Minimal Qt (qtbase + icu) for the requested version
 RUN set -ex && \
     test -n "${QT_VERSION}" && \
-    case "${TARGETARCH}" in \
-        arm64) AQT_HOST=linux_arm64; AQT_ARCH=linux_gcc_arm64 ;; \
-        *)     AQT_HOST=linux;       AQT_ARCH=gcc_64 ;; \
-    esac && \
+    qt_major="${QT_VERSION%%.*}" && \
+    qt_rest="${QT_VERSION#*.}" && \
+    qt_minor="${qt_rest%%.*}" && \
+    if [ "${TARGETARCH}" = 'arm64' ]; then \
+        AQT_HOST=linux_arm64; AQT_ARCH=linux_gcc_arm64; \
+    elif [ "${qt_major}" -gt 6 ] || { [ "${qt_major}" -eq 6 ] && [ "${qt_minor}" -ge 7 ]; }; then \
+        AQT_HOST=linux; AQT_ARCH=linux_gcc_64; \
+    else \
+        AQT_HOST=linux; AQT_ARCH=gcc_64; \
+    fi && \
     /opt/aqt/bin/aqt install-qt "${AQT_HOST}" desktop "${QT_VERSION}" "${AQT_ARCH}" \
         --archives qtbase icu -O /opt/Qt --external 7z && \
     ln -s "$(find /opt/Qt -mindepth 2 -maxdepth 2 -type d | sort | tail -n1)" /opt/Qt/current
