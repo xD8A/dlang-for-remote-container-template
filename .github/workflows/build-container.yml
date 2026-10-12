@@ -15,8 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { dc: dmd, version: '2.113.0', base: ubuntu, platforms: 'linux/amd64' }
-          - { dc: ldc, version: '1.43.0', base: ubuntu, platforms: 'linux/amd64,linux/arm64' }
+          - { dc: dmd, version: '2.113.0', base: devcontainer, platforms: 'linux/amd64' }
     steps:
       - uses: actions/checkout@v4
 
@@ -82,11 +81,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dc: [dmd, ldc]
+        dc: [dmd]
         qt_version: ['6.4.3', '6.5.3', '6.6.3', '6.7.3', '6.8.3', '6.9.3', '6.10.3', '6.11.3', '6.12.0']
         include:
-          - { dc: dmd, version: '2.113.0', base: ubuntu }
-          - { dc: ldc, version: '1.43.0', base: ubuntu }
+          - { dc: dmd, version: '2.113.0', base: devcontainer }
     steps:
       - uses: actions/checkout@v4
 
